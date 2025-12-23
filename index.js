@@ -1,88 +1,110 @@
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const cors = require('cors');
-require('dotenv').config();
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const cors = require("cors");
+require("dotenv").config();
 
 const app = express();
-app.use(cors());
+
+/**
+ * 🔹 CORS HTTP (Express)
+ * No es crítico para Socket, pero ayuda
+ */
+app.use(
+  cors({
+    origin: [
+      "https://tracking-app-kprs.vercel.app",
+      "http://localhost:3000",
+    ],
+    credentials: true,
+  })
+);
 
 const server = http.createServer(app);
 
+/**
+ * 🔹 SOCKET.IO CONFIG (LO MÁS IMPORTANTE)
+ */
 const io = new Server(server, {
-    cors: {
-        origin: "*", // Allow all origins for simplicity (or configure specific domains)
-        methods: ["GET", "POST"]
-    }
+  cors: {
+    origin: [
+      "https://tracking-app-kprs.vercel.app",
+      "http://localhost:3000",
+    ],
+    methods: ["GET", "POST"],
+    credentials: true,
+  },
+  transports: ["websocket"], // 👈 CLAVE
+  pingTimeout: 20000,
+  pingInterval: 25000,
 });
 
-// Track online users: Map<userId, socketId>
+// Track online users
 const onlineUsers = new Map();
 
 io.on("connection", (socket) => {
-    console.log("Client connected:", socket.id);
+  console.log("Client connected:", socket.id);
 
-    socket.on("user:check-presence", ({ userId }) => {
-        const isOnline = onlineUsers.has(userId);
-        if (isOnline) {
-            socket.emit(`user:${userId}:online`);
-        } else {
-            socket.emit(`user:${userId}:offline`);
-        }
+  socket.on("user:check-presence", ({ userId }) => {
+    const isOnline = onlineUsers.has(userId);
+    socket.emit(
+      isOnline ? `user:${userId}:online` : `user:${userId}:offline`
+    );
+  });
+
+  socket.on("user:online", ({ userId }) => {
+    console.log(`User ${userId} is online (Socket: ${socket.id})`);
+
+    onlineUsers.set(userId, socket.id);
+    socket.data.userId = userId;
+
+    io.emit(`user:${userId}:online`);
+    io.emit("user:status-change", { userId, status: "online" });
+  });
+
+  socket.on("admin:get-online-users", () => {
+    socket.emit("admin:online-users", Array.from(onlineUsers.keys()));
+  });
+
+  socket.on("user:location", ({ userId, location }) => {
+    io.emit("user:location-update", { userId, location });
+  });
+
+  socket.on("driver:route-started", ({ driverId, destinationId, clientId }) => {
+    io.emit(`client:${clientId}:driver-approaching`, {
+      driverId,
+      destinationId,
+    });
+  });
+
+  socket.on("driver:location-update", ({ driverId, location, activeRouteId }) => {
+    io.emit(`route:${activeRouteId}:driver-location`, {
+      driverId,
+      location,
     });
 
-    socket.on("user:online", ({ userId }) => {
-        console.log(`User ${userId} is online (Socket: ${socket.id})`);
-        onlineUsers.set(userId, socket.id);
-        socket.data.userId = userId;
-
-        // Broadcast to everyone that this user is online
-        io.emit(`user:${userId}:online`);
-        io.emit("user:status-change", { userId, status: "online" });
+    io.emit("user:location-update", {
+      userId: driverId,
+      location,
     });
+  });
 
-    socket.on("admin:get-online-users", () => {
-        const users = Array.from(onlineUsers.keys());
-        console.log("Admin requested online users:", users);
-        socket.emit("admin:online-users", users);
-    });
+  socket.on("disconnect", () => {
+    const userId = socket.data.userId;
 
-    socket.on("user:location", ({ userId, location }) => {
-        console.log(`Received location from ${userId}:`, location);
-        // Broadcast location update to admins (or everyone for now)
-        io.emit("user:location-update", { userId, location });
-    });
+    if (userId) {
+      onlineUsers.delete(userId);
 
-    // Route tracking events
-    socket.on("driver:route-started", ({ driverId, destinationId, clientId }) => {
-        console.log(`Driver ${driverId} started route to destination ${destinationId}`);
-        // Notify the specific client
-        io.emit(`client:${clientId}:driver-approaching`, { driverId, destinationId });
-    });
+      io.emit(`user:${userId}:offline`);
+      io.emit("user:status-change", { userId, status: "offline" });
+    }
 
-    socket.on("driver:location-update", ({ driverId, location, activeRouteId }) => {
-        // Broadcast driver's real-time location to all clients tracking this route
-        io.emit(`route:${activeRouteId}:driver-location`, { driverId, location });
-
-        // Also update the global admin map
-        io.emit("user:location-update", { userId: driverId, location });
-    });
-
-    socket.on("disconnect", () => {
-        const userId = socket.data.userId;
-        if (userId) {
-            console.log(`User ${userId} disconnected`);
-            onlineUsers.delete(userId);
-
-            // Broadcast to everyone that this user is offline
-            io.emit(`user:${userId}:offline`);
-            io.emit("user:status-change", { userId, status: "offline" });
-        }
-    });
+    console.log("Client disconnected:", socket.id);
+  });
 });
 
 const PORT = process.env.PORT || 4000;
 
 server.listen(PORT, () => {
-    console.log(`Socket server running on port ${PORT}`);
+  console.log(`🚀 Socket server running on port ${PORT}`);
 });
